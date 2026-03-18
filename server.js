@@ -249,7 +249,6 @@ try {
 await page.setUserAgent(UA_IPHONE);
 await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9', 'DNT': '1' });
 
-```
 // ── Request interception: block ads, capture m3u8 ────────────────────────
 await page.setRequestInterception(true);
 
@@ -333,7 +332,6 @@ return found;
 globals.forEach(u => streams.add(u));
 
 return { success: true, streams: [...streams], count: streams.size, log };
-```
 
 } finally {
 await page.close();
@@ -386,14 +384,12 @@ headers: {
 responseType: 'text',
 });
 
-```
 const streams = extractM3U8s(response.data, targetUrl);
 return res.json({
 success: true, mode: 'static', pageUrl: targetUrl,
 finalUrl: response.request?.res?.responseUrl || targetUrl,
 streams, count: streams.length,
 });
-```
 
 } catch (err) {
 const status = err.response?.status;
@@ -425,13 +421,11 @@ headers: {
 },
 });
 
-```
 const ct = response.headers['content-type'] || 'application/octet-stream';
 res.set('Content-Type', ct);
 res.set('Access-Control-Allow-Origin', '*');
 res.set('Cache-Control', 'no-store');
 res.send(response.data);
-```
 
 } catch (err) {
 res.status(502).send('Proxy error: ' + err.message);
