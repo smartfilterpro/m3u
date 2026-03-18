@@ -225,7 +225,10 @@ headless: config.headless,
 defaultViewport: config.defaultViewport,
 ignoreHTTPSErrors: true,
 });
-_browser.on('disconnected', () => { _browser = null; });
+_browser.on('disconnected', () => {
+    console.warn('[browser] Chromium disconnected — will relaunch on next request');
+    _browser = null;
+  });
 return _browser;
 }
 
@@ -437,4 +440,36 @@ status: 'ok', service: 'm3u8-extractor',
 modes: ['static (axios)', 'js (puppeteer)'],
 }));
 
-app.listen(PORT, () => console.log(`m3u8 extractor :${PORT}`));
+const server = app.listen(PORT, () => console.log(`m3u8 extractor :${PORT}`));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keep-alive & error handling — prevent silent exit on NAS / Docker
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Catch unhandled promise rejections (e.g. Puppeteer crashes) so the process
+// doesn't exit with code 0 or 1 silently.
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] Unhandled rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] Uncaught exception:', err);
+});
+
+// Graceful shutdown on SIGTERM (Docker stop) and SIGINT (Ctrl-C)
+function shutdown(signal) {
+  console.log(`[shutdown] Received ${signal}, closing server...`);
+  server.close(() => {
+    console.log('[shutdown] HTTP server closed.');
+    if (_browser) {
+      _browser.close().catch(() => {}).finally(() => process.exit(0));
+    } else {
+      process.exit(0);
+    }
+  });
+  // Force exit after 10s if graceful shutdown stalls
+  setTimeout(() => { console.error('[shutdown] Forced exit'); process.exit(1); }, 10000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
