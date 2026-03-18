@@ -307,7 +307,6 @@ await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 // ── Click play buttons to trigger stream loading ─────────────────────────
 await page.evaluate(() => {
 const selectors = [
-  // Common play button selectors
   '[class*="play" i]', '[id*="play" i]',
   '[aria-label*="play" i]', '[title*="play" i]',
   '[class*="btn-play" i]', '[class*="play-btn" i]',
@@ -317,7 +316,6 @@ const selectors = [
   'button[data-plyr="play"]',
   '.ytp-large-play-button',               // YouTube-style
   '[class*="icon-play" i]',
-  // Generic: large centered overlay buttons (likely play)
   'video',
   '.video-player [role="button"]',
   '[class*="player"] button',
@@ -328,7 +326,6 @@ for (const sel of selectors) {
   try {
     document.querySelectorAll(sel).forEach(el => {
       if (clicked.has(el)) return;
-      // Skip tiny elements (likely not play buttons)
       const rect = el.getBoundingClientRect();
       if (rect.width < 10 || rect.height < 10) return;
       el.click();
@@ -338,9 +335,6 @@ for (const sel of selectors) {
 }
 });
 log.push({ action: 'play-buttons-clicked' });
-
-// Small pause for click handlers to fire, then wait for streams
-await new Promise(r => setTimeout(r, 2000));
 
 // Click any iframes' play buttons too (cross-origin will silently fail)
 const frames = page.frames();
@@ -365,8 +359,14 @@ try {
 } catch {} // cross-origin frames will throw — that's expected
 }
 
-// Give JS players time to initialise after clicks
-await new Promise(r => setTimeout(r, waitMs));
+// ── Poll up to 10s for streams, exit early once found ────────────────────
+for (let elapsed = 0; elapsed < 10000; elapsed += 1000) {
+await new Promise(r => setTimeout(r, 1000));
+if (streams.size > 0) {
+  log.push({ action: 'stream-found-early', elapsed: elapsed + 1000 });
+  break;
+}
+}
 
 // ── Scrape full rendered HTML + inline scripts ────────────────────────────
 const fullText = await page.evaluate(() => {
