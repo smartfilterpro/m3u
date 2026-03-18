@@ -3,7 +3,7 @@ version: "3.8"
 services:
   m3u8-extractor:
     build:
-      context: https://github.com/smartfilterpro/m3u.git
+      context: .
     container_name: m3u8-extractor
     restart: unless-stopped
     ports:

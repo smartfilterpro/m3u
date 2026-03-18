@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M3U8 Stream Extractor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f1117; color: #e1e4e8; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2rem 1rem;
+  }
+  h1 { font-size: 1.6rem; margin-bottom: 0.3rem; }
+  .subtitle { color: #8b949e; margin-bottom: 1.5rem; font-size: 0.9rem; }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+    padding: 1.5rem; width: 100%; max-width: 640px; margin-bottom: 1rem;
+  }
+  label { display: block; font-size: 0.85rem; color: #8b949e; margin-bottom: 0.4rem; }
+  input[type="text"] {
+    width: 100%; padding: 0.6rem 0.8rem; border-radius: 6px;
+    border: 1px solid #30363d; background: #0d1117; color: #e1e4e8;
+    font-size: 0.95rem; outline: none;
+  }
+  input[type="text"]:focus { border-color: #58a6ff; }
+  .row { display: flex; gap: 0.8rem; margin-top: 0.8rem; align-items: center; flex-wrap: wrap; }
+  .toggle {
+    display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; cursor: pointer;
+  }
+  .toggle input { accent-color: #58a6ff; width: 16px; height: 16px; }
+  button {
+    padding: 0.6rem 1.4rem; border-radius: 6px; border: none;
+    background: #238636; color: #fff; font-size: 0.9rem; font-weight: 600;
+    cursor: pointer; transition: background 0.15s;
+  }
+  button:hover { background: #2ea043; }
+  button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+  .spinner { display: none; margin-left: 0.5rem; }
+  .spinner.active { display: inline-block; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #results { margin-top: 1rem; }
+  .result-header { font-size: 0.85rem; color: #8b949e; margin-bottom: 0.5rem; }
+  .stream-item {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    padding: 0.6rem 0.8rem; margin-bottom: 0.5rem;
+    display: flex; align-items: center; gap: 0.5rem; word-break: break-all;
+  }
+  .stream-url { flex: 1; font-size: 0.82rem; font-family: 'SF Mono', Monaco, monospace; color: #79c0ff; }
+  .stream-actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
+  .stream-actions button {
+    padding: 0.3rem 0.6rem; font-size: 0.75rem; background: #21262d;
+  }
+  .stream-actions button:hover { background: #30363d; }
+  .copy-btn.copied { background: #238636; }
+  .error { color: #f85149; font-size: 0.9rem; margin-top: 0.8rem; }
+  .no-results { color: #8b949e; font-size: 0.9rem; margin-top: 0.8rem; }
+  .badge {
+    display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px;
+    font-size: 0.75rem; font-weight: 600; margin-left: 0.5rem;
+  }
+  .badge-static { background: #1f6feb33; color: #58a6ff; }
+  .badge-js { background: #da363333; color: #f85149; }
+</style>
+</head>
+<body>
+
+<h1>M3U8 Stream Extractor</h1>
+<p class="subtitle">Paste a webpage URL to find m3u8 streams</p>
+
+<div class="card">
+  <label for="url">Page URL</label>
+  <input type="text" id="url" placeholder="https://example.com/video-page" autofocus>
+
+  <div class="row">
+    <label class="toggle">
+      <input type="checkbox" id="jsMode">
+      JS mode (Puppeteer) &mdash; slower but catches dynamic streams
+    </label>
+    <div style="flex:1"></div>
+    <button id="extractBtn" onclick="extract()">
+      Extract
+      <span class="spinner" id="spinner">&#9696;</span>
+    </button>
+  </div>
+</div>
+
+<div class="card" id="resultsCard" style="display:none">
+  <div id="results"></div>
+</div>
+
+<script>
+const urlInput = document.getElementById('url');
+const jsMode = document.getElementById('jsMode');
+const btn = document.getElementById('extractBtn');
+const spinner = document.getElementById('spinner');
+const resultsCard = document.getElementById('resultsCard');
+const results = document.getElementById('results');
+
+urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') extract(); });
+
+async function extract() {
+  const pageUrl = urlInput.value.trim();
+  if (!pageUrl) return;
+
+  btn.disabled = true;
+  spinner.classList.add('active');
+  resultsCard.style.display = 'none';
+  results.innerHTML = '';
+
+  const params = new URLSearchParams({ url: pageUrl });
+  if (jsMode.checked) params.set('js', 'true');
+
+  try {
+    const resp = await fetch('/extract?' + params);
+    const data = await resp.json();
+
+    resultsCard.style.display = 'block';
+
+    if (data.error) {
+      results.innerHTML = `<div class="error">${esc(data.error)}</div>`;
+      return;
+    }
+
+    const mode = data.mode === 'puppeteer' ? 'js' : 'static';
+    const badgeClass = mode === 'js' ? 'badge-js' : 'badge-static';
+
+    if (!data.streams || data.streams.length === 0) {
+      results.innerHTML = `<div class="no-results">No m3u8 streams found on this page. <span class="badge ${badgeClass}">${mode}</span></div>`;
+      if (mode === 'static') {
+        results.innerHTML += `<div class="no-results" style="margin-top:0.4rem">Try enabling <strong>JS mode</strong> for dynamically loaded streams.</div>`;
+      }
+      return;
+    }
+
+    let html = `<div class="result-header">Found ${data.streams.length} stream${data.streams.length > 1 ? 's' : ''} <span class="badge ${badgeClass}">${mode}</span></div>`;
+
+    data.streams.forEach((url, i) => {
+      html += `
+        <div class="stream-item">
+          <div class="stream-url">${esc(url)}</div>
+          <div class="stream-actions">
+            <button class="copy-btn" onclick="copyUrl(this, ${i})" title="Copy URL">Copy</button>
+            <button onclick="playStream(${i})" title="Open in player">Play</button>
+          </div>
+        </div>`;
+    });
+
+    results.innerHTML = html;
+    results._streams = data.streams;
+
+  } catch (err) {
+    resultsCard.style.display = 'block';
+    results.innerHTML = `<div class="error">Network error: ${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    spinner.classList.remove('active');
+  }
+}
+
+function copyUrl(el, i) {
+  const url = results._streams[i];
+  navigator.clipboard.writeText(url).then(() => {
+    el.textContent = 'Copied!';
+    el.classList.add('copied');
+    setTimeout(() => { el.textContent = 'Copy'; el.classList.remove('copied'); }, 1500);
+  });
+}
+
+function playStream(i) {
+  const url = results._streams[i];
+  // Open proxied URL so it works cross-origin
+  const proxyUrl = '/proxy?url=' + encodeURIComponent(url);
+  window.open(proxyUrl, '_blank');
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>
