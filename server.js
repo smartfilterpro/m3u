@@ -322,7 +322,7 @@ for (const k of Object.keys(window)) {
 try {
 const v = JSON.stringify(window[k]);
 if (v && v.includes('.m3u8')) {
-const hits = v.match(/https?:\\/\\/[^"'\\x60\\s]+\\.m3u8[^"'\\x60\\s]*/g);
+const hits = v.match(/https?:\/\/[^"'\x60\s]+\.m3u8[^"'\x60\s]*/g);
 if (hits) found.push(...hits);
 }
 } catch {}
