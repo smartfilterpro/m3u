@@ -52,6 +52,7 @@ COPY package.json ./
 RUN npm install --omit=dev
 
 COPY server.js ./
+COPY public ./public
 
 # Tell Puppeteer to use the system Chromium, not download its own
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
