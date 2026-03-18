@@ -58,6 +58,10 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Serve the web UI from /public
+const path = require('path');
+app.use(express.static(path.join(__dirname, 'public')));
+
 // ─────────────────────────────────────────────────────────────────────────────
 // User agents
 // ─────────────────────────────────────────────────────────────────────────────
@@ -434,8 +438,14 @@ res.status(502).send('Proxy error: ' + err.message);
 }
 });
 
-// Health
+// Health check (only reached if public/index.html doesn't exist)
 app.get('/', (req, res) => res.json({
+status: 'ok', service: 'm3u8-extractor',
+modes: ['static (axios)', 'js (puppeteer)'],
+}));
+
+// API health at /api/health (always available)
+app.get('/api/health', (req, res) => res.json({
 status: 'ok', service: 'm3u8-extractor',
 modes: ['static (axios)', 'js (puppeteer)'],
 }));
