@@ -304,7 +304,68 @@ await page.evaluateOnNewDocument(PAGE_GUARD_SCRIPT);
 // ── Navigate ──────────────────────────────────────────────────────────────
 await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-// Give JS players time to initialise
+// ── Click play buttons to trigger stream loading ─────────────────────────
+await page.evaluate(() => {
+const selectors = [
+  // Common play button selectors
+  '[class*="play" i]', '[id*="play" i]',
+  '[aria-label*="play" i]', '[title*="play" i]',
+  '[class*="btn-play" i]', '[class*="play-btn" i]',
+  '[class*="vjs-big-play" i]',           // video.js
+  '[class*="jw-icon-display" i]',         // JW Player
+  '[class*="plyr__control--overlaid" i]', // Plyr
+  'button[data-plyr="play"]',
+  '.ytp-large-play-button',               // YouTube-style
+  '[class*="icon-play" i]',
+  // Generic: large centered overlay buttons (likely play)
+  'video',
+  '.video-player [role="button"]',
+  '[class*="player"] button',
+];
+
+const clicked = new Set();
+for (const sel of selectors) {
+  try {
+    document.querySelectorAll(sel).forEach(el => {
+      if (clicked.has(el)) return;
+      // Skip tiny elements (likely not play buttons)
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 10 || rect.height < 10) return;
+      el.click();
+      clicked.add(el);
+    });
+  } catch {}
+}
+});
+log.push({ action: 'play-buttons-clicked' });
+
+// Small pause for click handlers to fire, then wait for streams
+await new Promise(r => setTimeout(r, 2000));
+
+// Click any iframes' play buttons too (cross-origin will silently fail)
+const frames = page.frames();
+for (const frame of frames) {
+if (frame === page.mainFrame()) continue;
+try {
+  await frame.evaluate(() => {
+    const selectors = [
+      '[class*="play" i]', '[id*="play" i]', 'video',
+      '[aria-label*="play" i]', '[class*="vjs-big-play" i]',
+      '[class*="jw-icon-display" i]', 'button[data-plyr="play"]',
+    ];
+    for (const sel of selectors) {
+      try {
+        document.querySelectorAll(sel).forEach(el => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width >= 10 && rect.height >= 10) el.click();
+        });
+      } catch {}
+    }
+  });
+} catch {} // cross-origin frames will throw — that's expected
+}
+
+// Give JS players time to initialise after clicks
 await new Promise(r => setTimeout(r, waitMs));
 
 // ── Scrape full rendered HTML + inline scripts ────────────────────────────
