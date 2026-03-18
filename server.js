@@ -239,7 +239,41 @@ return _browser;
 // ─────────────────────────────────────────────────────────────────────────────
 // Puppeteer extraction
 // ─────────────────────────────────────────────────────────────────────────────
-async function extractWithPuppeteer (targetUrl, waitMs = 8000) {
+const PLAY_SELECTORS = [
+  '[class*="play" i]', '[id*="play" i]',
+  '[aria-label*="play" i]', '[title*="play" i]',
+  '[class*="btn-play" i]', '[class*="play-btn" i]',
+  '[class*="vjs-big-play" i]',           // video.js
+  '[class*="jw-icon-display" i]',         // JW Player
+  '[class*="plyr__control--overlaid" i]', // Plyr
+  'button[data-plyr="play"]',
+  '.ytp-large-play-button',               // YouTube-style
+  '[class*="icon-play" i]',
+  'video',
+  '.video-player [role="button"]',
+  '[class*="player"] button',
+  '[class*="playButton" i]',
+  '[data-testid*="play" i]',
+  'svg[class*="play" i]',
+];
+
+function clickPlayButtons(doc) {
+  const clicked = new Set();
+  for (const sel of (typeof PLAY_SELECTORS !== 'undefined' ? PLAY_SELECTORS : arguments[1])) {
+    try {
+      doc.querySelectorAll(sel).forEach(el => {
+        if (clicked.has(el)) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 10 || rect.height < 10) return;
+        el.click();
+        clicked.add(el);
+      });
+    } catch {}
+  }
+  return clicked.size;
+}
+
+async function extractWithPuppeteer (targetUrl, waitMs = 12000) {
 const browser = await getBrowser();
 const page = await browser.newPage();
 const streams = new Set();
@@ -264,8 +298,18 @@ return req.abort();
 
 // Block popup/new-tab navigations from sub-frames
 if (type === 'document' && req.isNavigationRequest() && req.frame() !== page.mainFrame()) {
-log.push({ action: 'popup-blocked', url: url.slice(0, 100) });
-return req.abort();
+// Allow iframe navigations to same-ish domains (video embeds)
+try {
+  const dest = new URL(url);
+  const orig = new URL(targetUrl);
+  // Allow if it looks like a video embed (common patterns)
+  if (dest.hostname !== orig.hostname &&
+      !url.includes('embed') && !url.includes('player') &&
+      !url.includes('video') && !url.includes('iframe')) {
+    log.push({ action: 'popup-blocked', url: url.slice(0, 100) });
+    return req.abort();
+  }
+} catch {}
 }
 
 // Block cross-origin top-level navigations (redirects away)
@@ -286,15 +330,35 @@ streams.add(url);
 log.push({ action: 'stream-captured', url });
 }
 
+// Sniff common stream patterns in XHR/fetch URLs
+if (type === 'xhr' || type === 'fetch') {
+  if (url.includes('m3u8') || url.includes('playlist') || url.includes('manifest')) {
+    const m3u8Matches = url.match(/https?:\/\/[^\s"'`<>]+\.m3u8[^\s"'`<>]*/g);
+    if (m3u8Matches) m3u8Matches.forEach(u => streams.add(u));
+  }
+}
+
 req.continue();
 });
 
-// ── Sniff m3u8 in response content-type ──────────────────────────────────
-page.on('response', response => {
+// ── Sniff m3u8 in ALL responses (URL + content-type + body) ──────────────
+page.on('response', async response => {
 const url = response.url();
 const ct = response.headers()['content-type'] || '';
+
 if (ct.includes('mpegurl') || ct.includes('x-mpegurl') || url.includes('.m3u8')) {
-streams.add(url);
+  streams.add(url);
+  log.push({ action: 'stream-response', url });
+}
+
+// Check response body for m3u8 references in JSON/JS responses
+if (ct.includes('json') || ct.includes('javascript')) {
+  try {
+    const body = await response.text();
+    if (body.includes('.m3u8')) {
+      extractM3U8s(body, targetUrl).forEach(u => streams.add(u));
+    }
+  } catch {} // response may already be consumed
 }
 });
 
@@ -304,23 +368,9 @@ await page.evaluateOnNewDocument(PAGE_GUARD_SCRIPT);
 // ── Navigate ──────────────────────────────────────────────────────────────
 await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-// ── Click play buttons to trigger stream loading ─────────────────────────
-await page.evaluate(() => {
-const selectors = [
-  '[class*="play" i]', '[id*="play" i]',
-  '[aria-label*="play" i]', '[title*="play" i]',
-  '[class*="btn-play" i]', '[class*="play-btn" i]',
-  '[class*="vjs-big-play" i]',           // video.js
-  '[class*="jw-icon-display" i]',         // JW Player
-  '[class*="plyr__control--overlaid" i]', // Plyr
-  'button[data-plyr="play"]',
-  '.ytp-large-play-button',               // YouTube-style
-  '[class*="icon-play" i]',
-  'video',
-  '.video-player [role="button"]',
-  '[class*="player"] button',
-];
-
+// ── Click play buttons (round 1) ──────────────────────────────────────────
+const playSelectors = PLAY_SELECTORS;
+await page.evaluate((selectors) => {
 const clicked = new Set();
 for (const sel of selectors) {
   try {
@@ -333,20 +383,57 @@ for (const sel of selectors) {
     });
   } catch {}
 }
-});
-log.push({ action: 'play-buttons-clicked' });
+}, playSelectors);
+log.push({ action: 'play-buttons-clicked-round1' });
 
-// Click any iframes' play buttons too (cross-origin will silently fail)
-const frames = page.frames();
-for (const frame of frames) {
-if (frame === page.mainFrame()) continue;
-try {
-  await frame.evaluate(() => {
-    const selectors = [
-      '[class*="play" i]', '[id*="play" i]', 'video',
-      '[aria-label*="play" i]', '[class*="vjs-big-play" i]',
-      '[class*="jw-icon-display" i]', 'button[data-plyr="play"]',
-    ];
+// ── Click play buttons in ALL frames (iframes) ───────────────────────────
+async function clickInFrames() {
+  const frames = page.frames();
+  for (const frame of frames) {
+    if (frame === page.mainFrame()) continue;
+    try {
+      // Also extract m3u8 from frame HTML
+      const frameHtml = await frame.evaluate(() => document.documentElement.outerHTML);
+      extractM3U8s(frameHtml, targetUrl).forEach(u => streams.add(u));
+
+      await frame.evaluate((selectors) => {
+        for (const sel of selectors) {
+          try {
+            document.querySelectorAll(sel).forEach(el => {
+              const rect = el.getBoundingClientRect();
+              if (rect.width >= 10 && rect.height >= 10) el.click();
+            });
+          } catch {}
+        }
+      }, playSelectors);
+    } catch {} // cross-origin frames will throw — that's expected
+  }
+}
+await clickInFrames();
+
+// ── Wait for streams with network activity monitoring ─────────────────────
+let lastNetworkActivity = Date.now();
+const networkListener = () => { lastNetworkActivity = Date.now(); };
+page.on('request', networkListener);
+
+for (let elapsed = 0; elapsed < waitMs; elapsed += 1000) {
+  await new Promise(r => setTimeout(r, 1000));
+  if (streams.size > 0) {
+    // Found streams — wait 2 more seconds for additional variants
+    await new Promise(r => setTimeout(r, 2000));
+    log.push({ action: 'stream-found', elapsed: elapsed + 1000 });
+    break;
+  }
+  // If network went idle for 3s and we've waited at least 5s, stop early
+  if (elapsed >= 5000 && Date.now() - lastNetworkActivity > 3000) {
+    log.push({ action: 'network-idle-exit', elapsed });
+    break;
+  }
+}
+
+// ── Click play buttons again (round 2) — catches lazy-loaded players ──────
+if (streams.size === 0) {
+  await page.evaluate((selectors) => {
     for (const sel of selectors) {
       try {
         document.querySelectorAll(sel).forEach(el => {
@@ -355,20 +442,17 @@ try {
         });
       } catch {}
     }
-  });
-} catch {} // cross-origin frames will throw — that's expected
+  }, playSelectors);
+  await clickInFrames();
+  log.push({ action: 'play-buttons-clicked-round2' });
+  // Wait another 5s after second click round
+  for (let elapsed = 0; elapsed < 5000; elapsed += 1000) {
+    await new Promise(r => setTimeout(r, 1000));
+    if (streams.size > 0) break;
+  }
 }
 
-// ── Poll up to 10s for streams, exit early once found ────────────────────
-for (let elapsed = 0; elapsed < 10000; elapsed += 1000) {
-await new Promise(r => setTimeout(r, 1000));
-if (streams.size > 0) {
-  log.push({ action: 'stream-found-early', elapsed: elapsed + 1000 });
-  break;
-}
-}
-
-// ── Scrape full rendered HTML + inline scripts ────────────────────────────
+// ── Scrape full rendered HTML + inline scripts from ALL frames ────────────
 const fullText = await page.evaluate(() => {
 const scripts = [...document.querySelectorAll('script')]
 .map(s => s.textContent || '').join('\n');
@@ -376,21 +460,44 @@ return document.documentElement.outerHTML + '\n' + scripts;
 });
 extractM3U8s(fullText, targetUrl).forEach(u => streams.add(u));
 
-// ── Scan window-level globals for stream URLs ─────────────────────────────
-const globals = await page.evaluate(() => {
-const found = [];
-for (const k of Object.keys(window)) {
-try {
-const v = JSON.stringify(window[k]);
-if (v && v.includes('.m3u8')) {
-const hits = v.match(/https?:\/\/[^"'\x60\s]+\.m3u8[^"'\x60\s]*/g);
-if (hits) found.push(...hits);
+// Scan all iframes too
+const frames = page.frames();
+for (const frame of frames) {
+  if (frame === page.mainFrame()) continue;
+  try {
+    const frameText = await frame.evaluate(() => {
+      const scripts = [...document.querySelectorAll('script')]
+        .map(s => s.textContent || '').join('\n');
+      return document.documentElement.outerHTML + '\n' + scripts;
+    });
+    extractM3U8s(frameText, targetUrl).forEach(u => streams.add(u));
+  } catch {}
 }
-} catch {}
+
+// ── Scan window-level globals for stream URLs (all frames) ────────────────
+const scanGlobals = async (frame) => {
+  try {
+    const found = await frame.evaluate(() => {
+      const found = [];
+      for (const k of Object.keys(window)) {
+        try {
+          const v = JSON.stringify(window[k]);
+          if (v && v.includes('.m3u8')) {
+            const hits = v.match(/https?:\/\/[^"'\x60\s]+\.m3u8[^"'\x60\s]*/g);
+            if (hits) found.push(...hits);
+          }
+        } catch {}
+      }
+      return found;
+    });
+    found.forEach(u => streams.add(u));
+  } catch {}
+};
+
+await scanGlobals(page.mainFrame());
+for (const frame of frames) {
+  if (frame !== page.mainFrame()) await scanGlobals(frame);
 }
-return found;
-});
-globals.forEach(u => streams.add(u));
 
 return { success: true, streams: [...streams], count: streams.size, log };
 
@@ -491,6 +598,89 @@ res.send(response.data);
 } catch (err) {
 res.status(502).send('Proxy error: ' + err.message);
 }
+});
+
+/**
+ * GET /download
+ * ?url=    m3u8 URL to download
+ * ?referer= Referer to send with requests
+ * ?name=   Optional filename (without extension)
+ *
+ * Downloads the HLS stream via ffmpeg and streams back an MP4 file.
+ */
+const { spawn } = require('child_process');
+const activeDownloads = new Map();
+
+app.get('/download', (req, res) => {
+  const { url, referer, name } = req.query;
+  if (!url) return res.status(400).json({ error: 'Missing ?url= parameter' });
+
+  const filename = (name || 'stream_' + Date.now()) + '.mp4';
+  const ref = referer || (() => { try { return new URL(url).origin; } catch { return ''; } })();
+
+  // Build ffmpeg command
+  const args = [
+    '-y',
+    '-headers', `Referer: ${ref}\r\nUser-Agent: ${UA_IPHONE}\r\nOrigin: ${ref}\r\n`,
+    '-i', url,
+    '-c', 'copy',         // no re-encoding — fast
+    '-bsf:a', 'aac_adtstoasc',  // fix AAC streams for MP4 container
+    '-movflags', 'frag_keyframe+empty_moov+faststart',  // streamable MP4
+    '-f', 'mp4',
+    'pipe:1',             // output to stdout
+  ];
+
+  const downloadId = Date.now().toString(36);
+
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('X-Download-Id', downloadId);
+
+  const ffmpeg = spawn('ffmpeg', args, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  activeDownloads.set(downloadId, { ffmpeg, startedAt: Date.now() });
+
+  ffmpeg.stdout.pipe(res);
+
+  let stderrLog = '';
+  ffmpeg.stderr.on('data', chunk => {
+    stderrLog += chunk.toString();
+  });
+
+  ffmpeg.on('error', err => {
+    console.error('[download] ffmpeg spawn error:', err.message);
+    activeDownloads.delete(downloadId);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'ffmpeg not available: ' + err.message });
+    }
+  });
+
+  ffmpeg.on('close', code => {
+    activeDownloads.delete(downloadId);
+    if (code !== 0 && !res.headersSent) {
+      console.error('[download] ffmpeg exited with code', code, stderrLog.slice(-500));
+      res.status(500).json({ error: 'Download failed' });
+    }
+  });
+
+  req.on('close', () => {
+    // Client disconnected — kill ffmpeg
+    if (ffmpeg.exitCode === null) {
+      ffmpeg.kill('SIGTERM');
+      activeDownloads.delete(downloadId);
+    }
+  });
+});
+
+/**
+ * GET /download/status
+ * Returns count of active downloads
+ */
+app.get('/download/status', (req, res) => {
+  res.json({ active: activeDownloads.size });
 });
 
 // Health check (only reached if public/index.html doesn't exist)

@@ -80,6 +80,11 @@
   }
   .player-close:hover { background: rgba(255,0,0,0.6); }
   .play-active { background: #238636 !important; }
+  .dl-btn { position: relative; }
+  .dl-btn.downloading {
+    background: #1f6feb !important; color: #fff; pointer-events: none;
+  }
+  .dl-btn.dl-done { background: #238636 !important; }
 </style>
 </head>
 <body>
@@ -172,6 +177,7 @@ async function extract() {
           <div class="stream-actions">
             <button class="copy-btn" onclick="copyUrl(this, ${i})" title="Copy URL">Copy</button>
             <button class="play-btn" onclick="playStream(this, ${i})" title="Play stream">Play</button>
+            <button class="dl-btn" onclick="downloadStream(this, ${i})" title="Download as MP4">DL</button>
           </div>
         </div>`;
     });
@@ -253,6 +259,31 @@ function closePlayer(keepWrap) {
     playerWrap.style.display = 'none';
     if (activePlayBtn) { activePlayBtn.classList.remove('play-active'); activePlayBtn = null; }
   }
+}
+
+function downloadStream(el, i) {
+  const streamUrl = results._streams[i];
+  const referer = results._referer || '';
+  const params = new URLSearchParams({ url: streamUrl, referer });
+
+  el.textContent = 'DL...';
+  el.classList.add('downloading');
+
+  // Use a hidden link to trigger browser download
+  const a = document.createElement('a');
+  a.href = '/download?' + params.toString();
+  a.download = 'stream_' + Date.now() + '.mp4';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  // Reset button after a delay (download happens in background via browser)
+  setTimeout(() => {
+    el.textContent = 'DL';
+    el.classList.remove('downloading');
+    el.classList.add('dl-done');
+    setTimeout(() => el.classList.remove('dl-done'), 3000);
+  }, 3000);
 }
 
 function esc(s) {
