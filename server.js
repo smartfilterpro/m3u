@@ -68,14 +68,24 @@ app.use(express.static(path.join(__dirname, 'public')));
 const UA_IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// m3u8 regex patterns
+// Video URL regex patterns (m3u8 + mp4 + other formats)
 // ─────────────────────────────────────────────────────────────────────────────
+const VIDEO_EXTENSIONS = 'm3u8|mp4|mkv|webm|avi|mov|flv|wmv|m4v|ts';
+const VIDEO_EXT_RE = new RegExp(`\\.(${VIDEO_EXTENSIONS})`, 'i');
+
 const M3U8_PATTERNS = [
 /https?:\/\/[^\s"'`<>]+\.m3u8[^\s"'`<>]*/gi,
 /["'`](https?:\/\/[^"'`]+\.m3u8[^"'`]*)/gi,
 /(?:source|file|src|hls|stream|url|path|manifest)\s*[=:]\s*["'`]?(https?:\/\/[^"'`\s,)]+\.m3u8[^"'`\s,)]*)/gi,
 /["'`](https?:\/\/[^"'`]+\/[A-Za-z0-9+\/=~_-]{20,}\/[A-Za-z0-9+\/=]{10,}\.m3u8[^"'`]*)/gi,
 /https?:\/\/[^\s"'`<>]+cGxheWxpc3[^\s"'`<>]*/gi,
+];
+
+// Patterns for direct video file URLs (mp4, etc.)
+const VIDEO_URL_PATTERNS = [
+/https?:\/\/[^\s"'`<>]+\.(?:mp4|mkv|webm|mov|m4v)[^\s"'`<>]*/gi,
+/["'`](https?:\/\/[^"'`]+\.(?:mp4|mkv|webm|mov|m4v)[^"'`]*)/gi,
+/(?:source|file|src|video|stream|url|path)\s*[=:]\s*["'`]?(https?:\/\/[^"'`\s,)]+\.(?:mp4|mkv|webm|mov|m4v)[^"'`\s,)]*)/gi,
 ];
 
 function extractM3U8s(text, pageUrl) {
@@ -99,6 +109,35 @@ const rel = /["'`](\/[^"'`\s]+.m3u8[^"'`]*)/gi;
 let m;
 while ((m = rel.exec(text)) !== null) {
 if (base) found.add(base + m[1]);
+}
+
+return [...found];
+}
+
+function extractVideoURLs(text, pageUrl) {
+const found = new Set();
+let base = '';
+try { base = new URL(pageUrl).origin; } catch {}
+
+for (const pattern of VIDEO_URL_PATTERNS) {
+pattern.lastIndex = 0;
+let m;
+while ((m = pattern.exec(text)) !== null) {
+let u = (m[1] || m[0]).trim().replace(/["'`;,)>\s]+$/, '');
+if (!u.startsWith('http') && base) {
+u = base + (u.startsWith('/') ? '' : '/') + u;
+}
+// Filter out tiny assets, thumbnails, ads
+if (/thumb|poster|preview|pixel|track|beacon|\.gif|\.jpg|\.png|\.svg/i.test(u)) continue;
+found.add(u);
+}
+}
+
+// Relative paths
+const relVid = /["'`](\/[^"'`\s]+\.(?:mp4|mkv|webm|mov|m4v)[^"'`]*)/gi;
+let m2;
+while ((m2 = relVid.exec(text)) !== null) {
+if (base) found.add(base + m2[1]);
 }
 
 return [...found];
@@ -239,6 +278,22 @@ return _browser;
 // ─────────────────────────────────────────────────────────────────────────────
 // Puppeteer extraction
 // ─────────────────────────────────────────────────────────────────────────────
+// ── Server / source selection buttons (click BEFORE play) ──────────────────
+const SERVER_SELECTORS = [
+  '[class*="server" i]', '[id*="server" i]',
+  '[class*="source" i]', '[id*="source" i]',
+  '[data-id]',                                // common data-attribute pattern
+  '.nav-link[data-toggle]',                   // bootstrap tab servers
+  '[class*="server-item" i]', '[class*="server-btn" i]',
+  '[class*="streaming-server" i]',
+  '[class*="episode-server" i]',
+  '[class*="link-item" i]',
+  '[class*="server_item" i]',
+  'a[data-embed]', 'a[data-video]',           // embed link triggers
+  '[class*="watch-link" i]', '[class*="watch_link" i]',
+  'li[data-status]',                          // fmovies / watchseries style
+];
+
 const PLAY_SELECTORS = [
   '[class*="play" i]', '[id*="play" i]',
   '[aria-label*="play" i]', '[title*="play" i]',
@@ -277,6 +332,7 @@ async function extractWithPuppeteer (targetUrl, waitMs = 12000) {
 const browser = await getBrowser();
 const page = await browser.newPage();
 const streams = new Set();
+const videoUrls = new Set();   // direct video URLs (mp4, etc.)
 const log = [];
 
 try {
@@ -303,9 +359,12 @@ try {
   const dest = new URL(url);
   const orig = new URL(targetUrl);
   // Allow if it looks like a video embed (common patterns)
+  const embedPatterns = ['embed', 'player', 'video', 'iframe', 'stream',
+    'watch', 'play', 'hls', 'cloud', 'cdn', 'load', 'ajax', 'source',
+    'rabbitstream', 'megacloud', 'vidcloud', 'filemoon', 'streamtape',
+    'doodstream', 'mixdrop', 'upstream', 'voe.sx', 'vidoza'];
   if (dest.hostname !== orig.hostname &&
-      !url.includes('embed') && !url.includes('player') &&
-      !url.includes('video') && !url.includes('iframe')) {
+      !embedPatterns.some(p => url.toLowerCase().includes(p))) {
     log.push({ action: 'popup-blocked', url: url.slice(0, 100) });
     return req.abort();
   }
@@ -330,18 +389,32 @@ streams.add(url);
 log.push({ action: 'stream-captured', url });
 }
 
+// Sniff direct video URLs in requests
+if (VIDEO_EXT_RE.test(url) && !url.includes('.m3u8') && !/thumb|poster|preview|pixel|\.gif|\.jpg|\.png|\.svg/i.test(url)) {
+  // Only capture video file requests from media/xhr/fetch (skip page resources)
+  if (type === 'media' || type === 'xhr' || type === 'fetch' || type === 'other') {
+    videoUrls.add(url);
+    log.push({ action: 'video-url-captured', url });
+  }
+}
+
 // Sniff common stream patterns in XHR/fetch URLs
 if (type === 'xhr' || type === 'fetch') {
   if (url.includes('m3u8') || url.includes('playlist') || url.includes('manifest')) {
     const m3u8Matches = url.match(/https?:\/\/[^\s"'`<>]+\.m3u8[^\s"'`<>]*/g);
     if (m3u8Matches) m3u8Matches.forEach(u => streams.add(u));
   }
+  // Also check for video file URLs in API responses
+  if (url.includes('source') || url.includes('video') || url.includes('stream') ||
+      url.includes('getSources') || url.includes('getLink') || url.includes('ajax')) {
+    log.push({ action: 'api-request-detected', url: url.slice(0, 150) });
+  }
 }
 
 req.continue();
 });
 
-// ── Sniff m3u8 in ALL responses (URL + content-type + body) ──────────────
+// ── Sniff video URLs in ALL responses (URL + content-type + body) ─────────
 page.on('response', async response => {
 const url = response.url();
 const ct = response.headers()['content-type'] || '';
@@ -351,12 +424,22 @@ if (ct.includes('mpegurl') || ct.includes('x-mpegurl') || url.includes('.m3u8'))
   log.push({ action: 'stream-response', url });
 }
 
-// Check response body for m3u8 references in JSON/JS responses
-if (ct.includes('json') || ct.includes('javascript')) {
+// Capture direct video content-type responses
+if (ct.includes('video/') && !url.includes('.ts')) {
+  videoUrls.add(url);
+  log.push({ action: 'video-response', url });
+}
+
+// Check response body for m3u8 AND video URL references in JSON/JS responses
+if (ct.includes('json') || ct.includes('javascript') || ct.includes('text/plain')) {
   try {
     const body = await response.text();
     if (body.includes('.m3u8')) {
       extractM3U8s(body, targetUrl).forEach(u => streams.add(u));
+    }
+    // Also look for direct video file URLs in API responses
+    if (body.includes('.mp4') || body.includes('.mkv') || body.includes('.webm') || body.includes('.mov')) {
+      extractVideoURLs(body, targetUrl).forEach(u => videoUrls.add(u));
     }
   } catch {} // response may already be consumed
 }
@@ -367,6 +450,27 @@ await page.evaluateOnNewDocument(PAGE_GUARD_SCRIPT);
 
 // ── Navigate ──────────────────────────────────────────────────────────────
 await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+
+// ── Click server/source selection buttons first ───────────────────────────
+const serverSelectors = SERVER_SELECTORS;
+await page.evaluate((selectors) => {
+  for (const sel of selectors) {
+    try {
+      const els = document.querySelectorAll(sel);
+      // Click the first visible server button (usually the active/default one)
+      for (const el of els) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width >= 10 && rect.height >= 10) {
+          el.click();
+          break; // click just the first visible one
+        }
+      }
+    } catch {}
+  }
+}, serverSelectors);
+log.push({ action: 'server-buttons-clicked' });
+// Give time for embed iframe to load after server selection
+await new Promise(r => setTimeout(r, 2000));
 
 // ── Click play buttons (round 1) ──────────────────────────────────────────
 const playSelectors = PLAY_SELECTORS;
@@ -392,9 +496,10 @@ async function clickInFrames() {
   for (const frame of frames) {
     if (frame === page.mainFrame()) continue;
     try {
-      // Also extract m3u8 from frame HTML
+      // Also extract m3u8 + video URLs from frame HTML
       const frameHtml = await frame.evaluate(() => document.documentElement.outerHTML);
       extractM3U8s(frameHtml, targetUrl).forEach(u => streams.add(u));
+      extractVideoURLs(frameHtml, targetUrl).forEach(u => videoUrls.add(u));
 
       await frame.evaluate((selectors) => {
         for (const sel of selectors) {
@@ -418,7 +523,7 @@ page.on('request', networkListener);
 
 for (let elapsed = 0; elapsed < waitMs; elapsed += 1000) {
   await new Promise(r => setTimeout(r, 1000));
-  if (streams.size > 0) {
+  if (streams.size > 0 || videoUrls.size > 0) {
     // Found streams — wait 2 more seconds for additional variants
     await new Promise(r => setTimeout(r, 2000));
     log.push({ action: 'stream-found', elapsed: elapsed + 1000 });
@@ -432,7 +537,7 @@ for (let elapsed = 0; elapsed < waitMs; elapsed += 1000) {
 }
 
 // ── Click play buttons again (round 2) — catches lazy-loaded players ──────
-if (streams.size === 0) {
+if (streams.size === 0 && videoUrls.size === 0) {
   await page.evaluate((selectors) => {
     for (const sel of selectors) {
       try {
@@ -448,7 +553,7 @@ if (streams.size === 0) {
   // Wait another 5s after second click round
   for (let elapsed = 0; elapsed < 5000; elapsed += 1000) {
     await new Promise(r => setTimeout(r, 1000));
-    if (streams.size > 0) break;
+    if (streams.size > 0 || videoUrls.size > 0) break;
   }
 }
 
@@ -459,6 +564,7 @@ const scripts = [...document.querySelectorAll('script')]
 return document.documentElement.outerHTML + '\n' + scripts;
 });
 extractM3U8s(fullText, targetUrl).forEach(u => streams.add(u));
+extractVideoURLs(fullText, targetUrl).forEach(u => videoUrls.add(u));
 
 // Scan all iframes too
 const frames = page.frames();
@@ -471,7 +577,51 @@ for (const frame of frames) {
       return document.documentElement.outerHTML + '\n' + scripts;
     });
     extractM3U8s(frameText, targetUrl).forEach(u => streams.add(u));
+    extractVideoURLs(frameText, targetUrl).forEach(u => videoUrls.add(u));
   } catch {}
+}
+
+// ── Extract video element sources from all frames ──────────────────────────
+const extractVideoSources = async (frame) => {
+  try {
+    const sources = await frame.evaluate(() => {
+      const urls = [];
+      // Check all <video> elements
+      document.querySelectorAll('video').forEach(v => {
+        if (v.src && v.src.startsWith('http')) urls.push(v.src);
+        if (v.currentSrc && v.currentSrc.startsWith('http')) urls.push(v.currentSrc);
+        // Check <source> children
+        v.querySelectorAll('source').forEach(s => {
+          if (s.src && s.src.startsWith('http')) urls.push(s.src);
+        });
+      });
+      // Check standalone <source> elements
+      document.querySelectorAll('source[src]').forEach(s => {
+        if (s.src && s.src.startsWith('http')) urls.push(s.src);
+      });
+      // Check <iframe> src attributes for embed URLs
+      document.querySelectorAll('iframe[src]').forEach(f => {
+        if (f.src && f.src.startsWith('http')) urls.push('iframe:' + f.src);
+      });
+      return urls;
+    });
+    for (const u of sources) {
+      if (u.startsWith('iframe:')) {
+        const iframeUrl = u.slice(7);
+        log.push({ action: 'iframe-src-found', url: iframeUrl.slice(0, 150) });
+        // Don't add iframe URLs to streams, but log them for debugging
+      } else if (u.includes('.m3u8')) {
+        streams.add(u);
+      } else if (VIDEO_EXT_RE.test(u)) {
+        videoUrls.add(u);
+      }
+    }
+  } catch {}
+};
+
+await extractVideoSources(page.mainFrame());
+for (const frame of page.frames()) {
+  if (frame !== page.mainFrame()) await extractVideoSources(frame);
 }
 
 // ── Scan window-level globals for stream URLs (all frames) ────────────────
@@ -479,18 +629,22 @@ const scanGlobals = async (frame) => {
   try {
     const found = await frame.evaluate(() => {
       const found = [];
+      const videoExts = /\.(m3u8|mp4|mkv|webm|mov|m4v)/;
       for (const k of Object.keys(window)) {
         try {
           const v = JSON.stringify(window[k]);
-          if (v && v.includes('.m3u8')) {
-            const hits = v.match(/https?:\/\/[^"'\x60\s]+\.m3u8[^"'\x60\s]*/g);
+          if (v && (v.includes('.m3u8') || v.includes('.mp4') || v.includes('.mkv') || v.includes('.webm'))) {
+            const hits = v.match(/https?:\/\/[^"'\x60\s]+\.(?:m3u8|mp4|mkv|webm|mov|m4v)[^"'\x60\s]*/g);
             if (hits) found.push(...hits);
           }
         } catch {}
       }
       return found;
     });
-    found.forEach(u => streams.add(u));
+    found.forEach(u => {
+      if (u.includes('.m3u8')) streams.add(u);
+      else videoUrls.add(u);
+    });
   } catch {}
 };
 
@@ -499,7 +653,8 @@ for (const frame of frames) {
   if (frame !== page.mainFrame()) await scanGlobals(frame);
 }
 
-return { success: true, streams: [...streams], count: streams.size, log };
+const allVideoUrls = [...videoUrls].filter(u => !/thumb|poster|preview|pixel|beacon|\.gif|\.jpg|\.png|\.svg/i.test(u));
+return { success: true, streams: [...streams], videoUrls: allVideoUrls, count: streams.size + allVideoUrls.length, log };
 
 } finally {
 await page.close();
@@ -553,10 +708,11 @@ responseType: 'text',
 });
 
 const streams = extractM3U8s(response.data, targetUrl);
+const videoUrlsStatic = extractVideoURLs(response.data, targetUrl);
 return res.json({
 success: true, mode: 'static', pageUrl: targetUrl,
 finalUrl: response.request?.res?.responseUrl || targetUrl,
-streams, count: streams.length,
+streams, videoUrls: videoUrlsStatic, count: streams.length + videoUrlsStatic.length,
 });
 
 } catch (err) {
